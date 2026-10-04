@@ -7,18 +7,54 @@ VeriSight is a **fictional hackathon prototype** for Smart India Hackathon 2026 
 - Python 3.11 or newer
 - Node.js 20 or newer with npm
 - A Supabase project with a PostgreSQL database and a private Storage bucket
-- Two local terminals and internet access for the API, database, and evidence uploads
+- For local development, two terminals and internet access for the API, database, and evidence uploads
 
 ## Configure Supabase
 
-1. In your chosen Supabase project, create a **private** Storage bucket named `verisight-evidence`. Set its maximum file size to **5 MB** and allowed MIME types to `image/png`, `image/jpeg`, and `image/webp`. The bucket must exist before uploads work.
+1. In your chosen Supabase project, create a **private** Storage bucket named `verisight-evidence`. Set its maximum file size to **3 MB** and allowed MIME types to `image/png`, `image/jpeg`, and `image/webp`. The bucket must exist before uploads work.
 2. Run `Copy-Item .env.example .env` at the repository root. Paste the **PostgreSQL connection string** from the Supabase **Connect** dialog into `DATABASE_URL`. Use the session pooler for a long-running local API if direct IPv6 is unavailable; use the transaction pooler for a serverless API. The backend requires TLS and disables prepared statements for transaction pooler connections.
 3. Set `SUPABASE_URL` to the project's URL and `SUPABASE_SERVICE_ROLE_KEY` to the server-only legacy `service_role` JWT from **Project Settings → API Keys**. Keep this key in backend environment settings only. Never put it in `VITE_` variables or frontend code. Set `SUPABASE_STORAGE_BUCKET` if you chose a different bucket name.
 4. Run `python -m app.init_db` from `backend` after installing its dependencies. This creates the isolated `verisight` PostgreSQL schema, enables row-level security on its tables, and seeds fictional accounts and cases. The script is safe to run again; it does not reset existing demo records. Leave `verisight` out of Supabase's exposed API schemas.
 
 The app uses SQLAlchemy over a PostgreSQL connection for records and the Supabase Storage API for evidence. The frontend still calls FastAPI; it does not connect directly to Supabase.
 
-If you host the frontend on Vercel, set `VITE_API_URL` there to the public FastAPI origin and add the Vercel site origin to the backend's `FRONTEND_ORIGINS`. The Vite `/api` proxy only works during local development; the FastAPI backend also needs hosting.
+For the single-project Vercel deployment below, leave `VITE_API_URL` empty. The browser calls `/api` on the same origin. The Vite `/api` proxy only applies during local development.
+
+## Vercel Deployment
+
+One Vercel project serves the Vite frontend and the FastAPI function. Supabase supplies PostgreSQL and the private evidence bucket; it does not host this application's API or UI.
+
+1. Create your own Supabase project. Create the **private** `verisight-evidence` Storage bucket with a **3 MB** maximum and allowed MIME types `image/png`, `image/jpeg`, `image/webp`.
+2. In Supabase **Connect**, copy the **Transaction pooler** PostgreSQL URL (port `6543`). URL-encode any special characters in its password. Get the project URL and the server-only legacy `service_role` key from **Project Settings → API Keys**.
+3. Import this GitHub repository into **one** Vercel project. Set **Root Directory** to the repository root (`.`), not `frontend/`. Keep the root `vercel.json` settings: Framework Preset **Vite**, install `cd frontend && npm ci`, build `cd frontend && npm run build`, output `frontend/dist`. Do not set a separate backend URL or override these settings with old project values.
+4. Add the environment variables below in Vercel **Project Settings → Environment Variables** for Production and any Preview environments you intend to use. Redeploy after changing build-time variables.
+
+   | Variable | Visibility | Value |
+   | --- | --- | --- |
+   | `DATABASE_URL` | Server only | Supabase Transaction pooler PostgreSQL URL, port `6543` |
+   | `SUPABASE_URL` | Server only | `https://<project-ref>.supabase.co` |
+   | `SUPABASE_SERVICE_ROLE_KEY` | Server only | Supabase legacy `service_role` key; never use a `VITE_` prefix |
+   | `SUPABASE_STORAGE_BUCKET` | Server only | `verisight-evidence` |
+   | `GEOFENCE_RADIUS_METERS` | Server only | `250` |
+   | `FRONTEND_ORIGINS` | Server only | `http://127.0.0.1:5173,http://localhost:5173`; append the deployed site origin if cross-origin calls are needed |
+   | `VITE_API_URL` | Browser-visible | Leave unset or empty so requests use the same Vercel origin |
+
+5. Install backend dependencies locally and initialize the Supabase database **once** before logging in. From the repository root in PowerShell:
+
+   ```powershell
+   Copy-Item .env.example .env
+   # Fill DATABASE_URL, SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY in .env.
+   cd backend
+   python -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   .\.venv\Scripts\python.exe -m app.init_db
+   cd ..
+   ```
+
+   This command creates the `verisight` schema and fictional demo records; Vercel never runs it automatically. Keep that schema out of Supabase's exposed API schemas.
+6. Deploy from Vercel. Open `https://<your-vercel-domain>/docs` to confirm FastAPI, then open `/` and sign in as `reviewer` with `demo1234`. The browser's `POST /api/login` should return JSON, and the reviewer and inspector workflows should use the same domain. `/reviewer` and `/inspections` serve the frontend shell if opened directly; this UI currently uses in-page state rather than URL-based React routes.
+
+If an existing Vercel project was created with `frontend/` as its Root Directory, change it to the repository root and redeploy. Otherwise Vercel cannot see `api/index.py`, `vercel.json`, or the root Python requirements, and `/api/login` will return a static 404.
 
 ## Start locally (PowerShell)
 
@@ -77,7 +113,7 @@ A shorter presentation script is in [docs/demo-script.md](docs/demo-script.md).
 - **Backend:** FastAPI REST API with automatic OpenAPI docs and server-side role checks.
 - **Storage:** Supabase PostgreSQL through SQLAlchemy, plus a private Supabase Storage bucket for evidence. App tables live in the `verisight` schema, outside the exposed Data API. Tables include users, sites, cases, append-only assignment events, inspections, checklist responses, findings, evidence, follow-up actions, audit events, remote verification events, and demo sessions. Foreign keys and indexes cover key lookups.
 - **Demo authentication:** Seeded passwords are PBKDF2 hashed. Logins produce random 12-hour bearer sessions stored as token hashes. This is only a local demo and lacks production account controls.
-- **Evidence:** The server accepts base64 encoded PNG/JPEG/WebP through `POST /api/inspections/{id}/evidence`, checks a 5 MB limit and file signature, uploads under a random key in the private bucket, then records SHA-256 of the received bytes and a server timestamp in PostgreSQL. Original filenames are retained only as display metadata. Optional capture time and coordinates are labelled client-reported.
+- **Evidence:** The server accepts base64 encoded PNG/JPEG/WebP through `POST /api/inspections/{id}/evidence`, checks a 3 MB limit and file signature, uploads under a random key in the private bucket, then records SHA-256 of the received bytes and a server timestamp in PostgreSQL. Original filenames are retained only as display metadata. Optional capture time and coordinates are labelled client-reported. The 3 MB limit keeps the base64 JSON request under Vercel's 4.5 MB function body limit.
 - **Offline drafts:** Checklist answers and notes are saved in browser `localStorage` per demo user and case. They can be manually synced, and a pending draft retries on the browser `online` event. The UI does not claim encryption or a successful submission until the server confirms it.
 
 ### Assignment verification algorithm

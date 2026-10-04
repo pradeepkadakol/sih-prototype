@@ -220,13 +220,13 @@ def create_app(database_url: str | None = None, evidence_store: EvidenceStore | 
     if database_url is None:
         database_url = os.getenv("DATABASE_URL", "")
         if not database_url.startswith(("postgresql://", "postgres://", "postgresql+psycopg://")):
-            raise RuntimeError("Set DATABASE_URL to your Supabase PostgreSQL URL in the root .env file")
+            raise RuntimeError("Set DATABASE_URL to your Supabase PostgreSQL URL in the environment or root .env file")
     if evidence_store is None:
         url = os.getenv("SUPABASE_URL", "")
         key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
         bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "verisight-evidence")
         if not url or not key:
-            raise RuntimeError("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the root .env file")
+            raise RuntimeError("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the environment or root .env file")
         evidence_store = SupabaseEvidenceStore(url, key, bucket)
     engine = make_engine(database_url)
     if initialize:
@@ -234,7 +234,8 @@ def create_app(database_url: str | None = None, evidence_store: EvidenceStore | 
     SessionLocal = sessionmaker(engine, expire_on_commit=False)
 
     app = FastAPI(title="VeriSight Demo API", version="0.1.0", description="Fictional SIH26095 prototype; not production-ready.")
-    app.add_middleware(CORSMiddleware, allow_origins=os.getenv("FRONTEND_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(","), allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Authorization", "Content-Type"])
+    origins = [origin.strip() for origin in os.getenv("FRONTEND_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",") if origin.strip()]
+    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Authorization", "Content-Type"])
 
     def get_db():
         with SessionLocal() as db:
@@ -453,14 +454,14 @@ def create_app(database_url: str | None = None, evidence_store: EvidenceStore | 
         allowed = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
         if body.mime_type not in allowed:
             raise HTTPException(422, "Only PNG, JPEG, and WebP images are supported")
-        if len(body.data_base64) > 8_000_000:
-            raise HTTPException(413, "Evidence exceeds 5 MB")
+        if len(body.data_base64) > 4_000_000:
+            raise HTTPException(413, "Evidence exceeds 3 MB")
         try:
             content = base64.b64decode(body.data_base64, validate=True)
         except (binascii.Error, ValueError):
             raise HTTPException(422, "Invalid base64 evidence data")
-        if not content or len(content) > 5_000_000:
-            raise HTTPException(413, "Evidence must be between 1 byte and 5 MB")
+        if not content or len(content) > 3_000_000:
+            raise HTTPException(413, "Evidence must be between 1 byte and 3 MB")
         signatures = {"image/png": content.startswith(b"\x89PNG\r\n\x1a\n"),
                       "image/jpeg": content.startswith(b"\xff\xd8\xff"),
                       "image/webp": content.startswith(b"RIFF") and content[8:12] == b"WEBP"}

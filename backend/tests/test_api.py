@@ -94,6 +94,34 @@ def test_upload_rejects_wrong_mime_and_bad_bytes(client):
     assert response.status_code == 422
 
 
+def test_upload_rejects_image_that_would_exceed_vercel_request_limit(client, store):
+    reviewer = auth(client, "reviewer")
+    case = next(case for case in client.get("/api/inspections", headers=reviewer).json() if case["status"] == "assigned")
+    detail = client.get(f"/api/inspections/{case['id']}", headers=reviewer).json()
+    inspector = auth(client, detail["assigned_inspector"]["username"])
+    client.post(f"/api/inspections/{case['id']}/check-in", headers=inspector, json={"demo_override": True})
+    raw = b"\x89PNG\r\n\x1a\n" + b"x" * (3_000_001 - 8)
+    response = client.post(
+        f"/api/inspections/{case['id']}/evidence",
+        headers=inspector,
+        json={"filename": "large.png", "mime_type": "image/png", "data_base64": base64.b64encode(raw).decode()},
+    )
+    assert response.status_code == 413
+    assert store.objects == {}
+
+
+def test_cors_accepts_comma_separated_origins_with_spaces(tmp_path, store, monkeypatch):
+    monkeypatch.setenv("FRONTEND_ORIGINS", "http://127.0.0.1:5173, https://example.vercel.app")
+    app = create_app(f"sqlite:///{(tmp_path / 'cors.db').as_posix()}", evidence_store=store)
+    with TestClient(app) as test_client:
+        response = test_client.options(
+            "/api/login",
+            headers={"Origin": "https://example.vercel.app", "Access-Control-Request-Method": "POST"},
+        )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://example.vercel.app"
+
+
 def test_storage_failure_does_not_create_evidence_row(client, store):
     reviewer = auth(client, "reviewer")
     case = next(case for case in client.get("/api/inspections", headers=reviewer).json() if case["status"] == "assigned")

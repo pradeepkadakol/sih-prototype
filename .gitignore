@@ -10,5 +10,6 @@ backend/tests/__pycache__/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+.vercel/
 .env
 *.pyc
