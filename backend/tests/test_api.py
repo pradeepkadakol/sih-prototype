@@ -6,11 +6,31 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.logic import select_inspector
+from app.storage import StorageError
+
+
+class FakeStore:
+    def __init__(self):
+        self.objects = {}
+        self.fail_upload = False
+
+    def upload(self, key, content, mime_type):
+        if self.fail_upload:
+            raise StorageError("Upload failed")
+        self.objects[key] = (content, mime_type)
+
+    def delete(self, key):
+        self.objects.pop(key, None)
 
 
 @pytest.fixture
-def client(tmp_path):
-    app = create_app(f"sqlite:///{(tmp_path / 'demo.db').as_posix()}", tmp_path / "uploads")
+def store():
+    return FakeStore()
+
+
+@pytest.fixture
+def client(tmp_path, store):
+    app = create_app(f"sqlite:///{(tmp_path / 'demo.db').as_posix()}", evidence_store=store, initialize=True)
     with TestClient(app) as test_client:
         yield test_client
 
@@ -37,7 +57,7 @@ def test_assignment_history_reveal_and_role_checks(client):
     assert select_inspector(bytes.fromhex(revealed["seed"]), revealed["case_id"], revealed["eligible"], revealed["event_number"]) == revealed["selected_inspector_id"]
 
 
-def test_inspector_submission_evidence_review_followup(client, tmp_path):
+def test_inspector_submission_evidence_review_followup(client, store):
     reviewer = auth(client, "reviewer")
     cases = client.get("/api/inspections", headers=reviewer).json()
     case_id = next(case["id"] for case in cases if case["status"] == "assigned")
@@ -54,7 +74,7 @@ def test_inspector_submission_evidence_review_followup(client, tmp_path):
     evidence = client.post(f"/api/inspections/{case_id}/evidence", headers=inspector, json={"filename": "site.png", "mime_type": "image/png", "data_base64": base64.b64encode(raw).decode()}).json()
     assert evidence["sha256"] == hashlib.sha256(raw).hexdigest()
     assert evidence["server_received_at"]
-    assert [path.read_bytes() for path in (tmp_path / "uploads").iterdir()] == [raw]
+    assert list(store.objects.values()) == [(raw, "image/png")]
     assert client.post(f"/api/inspections/{case_id}/submit", headers=inspector).status_code == 200
     assert client.post(f"/api/findings/{finding['id']}/review", headers=inspector, json={"status": "accepted", "note": "Looks valid"}).status_code == 403
     assert client.post(f"/api/findings/{finding['id']}/review", headers=reviewer, json={"status": "accepted", "note": "Repair needed"}).status_code == 200
@@ -72,6 +92,20 @@ def test_upload_rejects_wrong_mime_and_bad_bytes(client):
     client.post(f"/api/inspections/{case['id']}/check-in", headers=inspector, json={"demo_override": True})
     response = client.post(f"/api/inspections/{case['id']}/evidence", headers=inspector, json={"filename": "x.html", "mime_type": "text/html", "data_base64": base64.b64encode(b"<script>").decode()})
     assert response.status_code == 422
+
+
+def test_storage_failure_does_not_create_evidence_row(client, store):
+    reviewer = auth(client, "reviewer")
+    case = next(case for case in client.get("/api/inspections", headers=reviewer).json() if case["status"] == "assigned")
+    detail = client.get(f"/api/inspections/{case['id']}", headers=reviewer).json()
+    inspector = auth(client, detail["assigned_inspector"]["username"])
+    client.post(f"/api/inspections/{case['id']}/check-in", headers=inspector, json={"demo_override": True})
+    store.fail_upload = True
+    raw = b"\x89PNG\r\n\x1a\n" + b"demo-image"
+    response = client.post(f"/api/inspections/{case['id']}/evidence", headers=inspector, json={"filename": "site.png", "mime_type": "image/png", "data_base64": base64.b64encode(raw).decode()})
+    assert response.status_code == 503
+    assert client.get(f"/api/inspections/{case['id']}", headers=inspector).json()["evidence"] == []
+    assert store.objects == {}
 
 
 def test_new_case_cannot_use_seeded_demo_geofence_override(client):

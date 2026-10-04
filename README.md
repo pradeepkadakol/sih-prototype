@@ -1,13 +1,24 @@
-# VeriSight — local inspection demo
+# VeriSight — inspection demo
 
-VeriSight is a **fictional, local hackathon prototype** for Smart India Hackathon 2026 problem **SIH26095**, “Smart Real-Time Monitoring & Inspection Mobile App.” It demonstrates a case moving from reviewer assignment through inspector check-in, checklist, finding, evidence, submission, review, and follow-up. **Demo mode** and simulated features are labelled in the UI. This is not a production integration.
+VeriSight is a **fictional hackathon prototype** for Smart India Hackathon 2026 problem **SIH26095**, “Smart Real-Time Monitoring & Inspection Mobile App.” It demonstrates a case moving from reviewer assignment through inspector check-in, checklist, finding, evidence, submission, review, and follow-up. **Demo mode** and simulated features are labelled in the UI. This is not a production integration.
 
 ## Prerequisites
 
 - Python 3.11 or newer
 - Node.js 20 or newer with npm
-- Two local terminals
-- Internet access only for the optional OpenStreetMap map tiles and initial package installation. The site list remains usable without tiles.
+- A Supabase project with a PostgreSQL database and a private Storage bucket
+- Two local terminals and internet access for the API, database, and evidence uploads
+
+## Configure Supabase
+
+1. In your chosen Supabase project, create a **private** Storage bucket named `verisight-evidence`. Set its maximum file size to **5 MB** and allowed MIME types to `image/png`, `image/jpeg`, and `image/webp`. The bucket must exist before uploads work.
+2. Run `Copy-Item .env.example .env` at the repository root. Paste the **PostgreSQL connection string** from the Supabase **Connect** dialog into `DATABASE_URL`. Use the session pooler for a long-running local API if direct IPv6 is unavailable; use the transaction pooler for a serverless API. The backend requires TLS and disables prepared statements for transaction pooler connections.
+3. Set `SUPABASE_URL` to the project's URL and `SUPABASE_SERVICE_ROLE_KEY` to the server-only legacy `service_role` JWT from **Project Settings → API Keys**. Keep this key in backend environment settings only. Never put it in `VITE_` variables or frontend code. Set `SUPABASE_STORAGE_BUCKET` if you chose a different bucket name.
+4. Run `python -m app.init_db` from `backend` after installing its dependencies. This creates the isolated `verisight` PostgreSQL schema, enables row-level security on its tables, and seeds fictional accounts and cases. The script is safe to run again; it does not reset existing demo records. Leave `verisight` out of Supabase's exposed API schemas.
+
+The app uses SQLAlchemy over a PostgreSQL connection for records and the Supabase Storage API for evidence. The frontend still calls FastAPI; it does not connect directly to Supabase.
+
+If you host the frontend on Vercel, set `VITE_API_URL` there to the public FastAPI origin and add the Vercel site origin to the backend's `FRONTEND_ORIGINS`. The Vite `/api` proxy only works during local development; the FastAPI backend also needs hosting.
 
 ## Start locally (PowerShell)
 
@@ -17,7 +28,8 @@ In terminal 1, from the repository root:
 cd backend
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+.\.venv\Scripts\python.exe -m app.init_db
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --factory --host 127.0.0.1 --port 8000 --reload
 ```
 
 In terminal 2, from the repository root:
@@ -28,7 +40,7 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Open **http://127.0.0.1:5173**. The API docs are at **http://127.0.0.1:8000/docs**. On first backend startup, SQLite tables and fictional demo records are initialized automatically. The database is `backend/verisight.db`, and uploaded evidence is kept in `backend/uploads/`. To reset only this demo data, stop the server and remove those two generated paths, then restart. Do not remove other files.
+Open **http://127.0.0.1:5173**. The API docs are at **http://127.0.0.1:8000/docs**. PostgreSQL tables and fictional records are initialized by the explicit `app.init_db` command; evidence files go to your private Supabase bucket. Existing local `backend/verisight.db` and `backend/uploads/` files are not migrated automatically.
 
 Keep **both terminals running** while using the app. If Vite prints `http proxy error: /api/login` with `ECONNREFUSED 127.0.0.1:8000`, the FastAPI backend is not running. Start the terminal 1 command above and wait for `Uvicorn running on http://127.0.0.1:8000`, then retry login. You can check the backend directly at **http://127.0.0.1:8000/docs**.
 
@@ -63,9 +75,9 @@ A shorter presentation script is in [docs/demo-script.md](docs/demo-script.md).
 
 - **Frontend:** React, TypeScript, Vite, Leaflet with OpenStreetMap tiles and an always-visible site list fallback. Responsive inspector controls support a phone-sized viewport.
 - **Backend:** FastAPI REST API with automatic OpenAPI docs and server-side role checks.
-- **Storage:** SQLite through SQLAlchemy, plus local evidence files. Tables include users, sites, cases, append-only assignment events, inspections, checklist responses, findings, evidence, follow-up actions, audit events, remote verification events, and demo sessions. Foreign keys and indexes cover key lookups.
+- **Storage:** Supabase PostgreSQL through SQLAlchemy, plus a private Supabase Storage bucket for evidence. App tables live in the `verisight` schema, outside the exposed Data API. Tables include users, sites, cases, append-only assignment events, inspections, checklist responses, findings, evidence, follow-up actions, audit events, remote verification events, and demo sessions. Foreign keys and indexes cover key lookups.
 - **Demo authentication:** Seeded passwords are PBKDF2 hashed. Logins produce random 12-hour bearer sessions stored as token hashes. This is only a local demo and lacks production account controls.
-- **Evidence:** The server accepts base64 encoded PNG/JPEG/WebP through `POST /api/inspections/{id}/evidence`, checks a 5 MB limit and file signature, creates a random storage filename, then records SHA-256 of the received bytes and a server timestamp. Original filenames are retained only as display metadata. Optional capture time and coordinates are labelled client-reported.
+- **Evidence:** The server accepts base64 encoded PNG/JPEG/WebP through `POST /api/inspections/{id}/evidence`, checks a 5 MB limit and file signature, uploads under a random key in the private bucket, then records SHA-256 of the received bytes and a server timestamp in PostgreSQL. Original filenames are retained only as display metadata. Optional capture time and coordinates are labelled client-reported.
 - **Offline drafts:** Checklist answers and notes are saved in browser `localStorage` per demo user and case. They can be manually synced, and a pending draft retries on the browser `online` event. The UI does not claim encryption or a successful submission until the server confirms it.
 
 ### Assignment verification algorithm
@@ -122,6 +134,6 @@ The backend suite covers assignment eligibility and history, deterministic selec
 
 ## Limitations and future adapters
 
-This prototype uses fictional people, organizations, sites, and dates. It has no real agency directory, GIS boundary service, device attestation, video stream, offline encryption, independent randomness beacon, or production identity system. Browser geolocation and capture metadata can be spoofed. Evidence hashing detects later byte changes only when compared with a trusted record; it does not establish capture time, place, or authenticity. The demo password, local bearer storage, SQLite database, and local file uploads are not appropriate for real deployment. Real use requires a security, privacy, legal, accessibility, and operational review, including retention rules and independent audit controls.
+This prototype uses fictional people, organizations, sites, and dates. It has no real agency directory, GIS boundary service, device attestation, video stream, offline encryption, independent randomness beacon, or production identity system. Browser geolocation and capture metadata can be spoofed. Evidence hashing detects later byte changes only when compared with a trusted record; it does not establish capture time, place, or authenticity. The demo password and browser bearer storage are not appropriate for real deployment. Supabase persistence does not turn this demo into a production system. Real use requires a security, privacy, legal, accessibility, and operational review, including retention rules and independent audit controls.
 
-Future adapters could connect an agency identity provider, authoritative site registry, a secure object store, and WebRTC or RTSP/ONVIF remote verification. CCTV is unavailable in this MVP; no video is presented as live.
+Future adapters could connect an agency identity provider, authoritative site registry, and WebRTC or RTSP/ONVIF remote verification. CCTV is unavailable in this MVP; no video is presented as live.

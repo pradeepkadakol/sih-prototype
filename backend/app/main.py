@@ -1,10 +1,11 @@
-"""VeriSight local demo REST API. All identities and records are fictional."""
+"""VeriSight demo REST API. All identities and records are fictional."""
 
 import base64
 import binascii
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import uuid
@@ -13,14 +14,21 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from .database import initialize_database, make_engine
 from .logic import ALGORITHM, candidate_weights, distance_meters, missing_required, select_inspector
-from .models import (AuditEvent, AssignmentEvent, Base, ChecklistResponse, Evidence, Finding,
+from .models import (AuditEvent, AssignmentEvent, ChecklistResponse, Evidence, Finding,
                      FollowUpAction, Inspection, InspectionCase, RemoteVerificationEvent, SessionToken, Site, User, now)
-from .seed import DEFAULT_TEMPLATE, seed_database
+from .seed import DEFAULT_TEMPLATE
+from .storage import EvidenceStore, StorageError, SupabaseEvidenceStore
+
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+logger = logging.getLogger(__name__)
 
 
 def iso(value):
@@ -207,21 +215,25 @@ def audit(db: Session, actor_id: int | None, action: str, entity_type: str, enti
     db.add(AuditEvent(actor_id=actor_id, action=action, entity_type=entity_type, entity_id=entity_id, details=details[:500]))
 
 
-def create_app(database_url: str | None = None, upload_dir: Path | None = None) -> FastAPI:
-    database_url = database_url or os.getenv("DATABASE_URL", "sqlite:///./verisight.db")
-    upload_dir = Path(upload_dir or os.getenv("UPLOAD_DIR", "./uploads"))
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(database_url, connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {})
-    if database_url.startswith("sqlite"):
-        @event.listens_for(engine, "connect")
-        def set_sqlite_pragma(connection, _record):
-            connection.execute("PRAGMA foreign_keys=ON")
-    Base.metadata.create_all(engine)
+def create_app(database_url: str | None = None, evidence_store: EvidenceStore | None = None,
+               initialize: bool = False) -> FastAPI:
+    if database_url is None:
+        database_url = os.getenv("DATABASE_URL", "")
+        if not database_url.startswith(("postgresql://", "postgres://", "postgresql+psycopg://")):
+            raise RuntimeError("Set DATABASE_URL to your Supabase PostgreSQL URL in the root .env file")
+    if evidence_store is None:
+        url = os.getenv("SUPABASE_URL", "")
+        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+        bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "verisight-evidence")
+        if not url or not key:
+            raise RuntimeError("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the root .env file")
+        evidence_store = SupabaseEvidenceStore(url, key, bucket)
+    engine = make_engine(database_url)
+    if initialize:
+        initialize_database(engine)
     SessionLocal = sessionmaker(engine, expire_on_commit=False)
-    with SessionLocal() as db:
-        seed_database(db)
 
-    app = FastAPI(title="VeriSight Demo API", version="0.1.0", description="Fictional local SIH26095 prototype; not production-ready.")
+    app = FastAPI(title="VeriSight Demo API", version="0.1.0", description="Fictional SIH26095 prototype; not production-ready.")
     app.add_middleware(CORSMiddleware, allow_origins=os.getenv("FRONTEND_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(","), allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Authorization", "Content-Type"])
 
     def get_db():
@@ -454,17 +466,29 @@ def create_app(database_url: str | None = None, upload_dir: Path | None = None) 
                       "image/webp": content.startswith(b"RIFF") and content[8:12] == b"WEBP"}
         if not signatures[body.mime_type]:
             raise HTTPException(422, "File bytes do not match the declared image type")
-        filename = uuid.uuid4().hex + allowed[body.mime_type]
-        (upload_dir / filename).write_bytes(content)
+        filename = f"inspections/{inspection.id}/{uuid.uuid4().hex}{allowed[body.mime_type]}"
+        try:
+            evidence_store.upload(filename, content, body.mime_type)
+        except StorageError:
+            logger.exception("Evidence upload failed")
+            raise HTTPException(503, "Evidence storage is unavailable; retry the upload")
         evidence = Evidence(inspection_id=inspection.id, inspector_id=user.id,
                             original_filename=Path(body.filename.replace("\\", "/")).name,
                             storage_filename=filename, mime_type=body.mime_type, size_bytes=len(content),
                             sha256=hashlib.sha256(content).hexdigest(), client_capture_time=body.client_capture_time,
                             client_latitude=body.client_latitude, client_longitude=body.client_longitude)
-        db.add(evidence)
-        db.flush()
-        audit(db, user.id, "evidence_added", "evidence", evidence.id, evidence.sha256)
-        db.commit()
+        try:
+            db.add(evidence)
+            db.flush()
+            audit(db, user.id, "evidence_added", "evidence", evidence.id, evidence.sha256)
+            db.commit()
+        except Exception:
+            db.rollback()
+            try:
+                evidence_store.delete(filename)
+            except StorageError:
+                logger.exception("Could not remove uploaded evidence after database failure")
+            raise
         return evidence_json(evidence)
 
     @app.post("/api/inspections/{case_id}/submit")
@@ -560,4 +584,5 @@ def create_app(database_url: str | None = None, upload_dir: Path | None = None) 
     return app
 
 
-app = create_app()
+# Uvicorn loads this callable with --factory after environment configuration.
+app = create_app

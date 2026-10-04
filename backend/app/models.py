@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, MetaData, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+SCHEMA = "verisight"
 
 
 def now():
@@ -9,7 +12,7 @@ def now():
 
 
 class Base(DeclarativeBase):
-    pass
+    metadata = MetaData(schema=SCHEMA)
 
 
 class User(Base):
