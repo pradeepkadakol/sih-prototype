@@ -1,0 +1,14 @@
+backend/.venv/
+backend/verisight.db
+backend/uploads/
+backend/.pytest_tmp/
+backend/.pytest_cache/
+.pytest_cache/
+backend/__pycache__/
+backend/app/__pycache__/
+backend/tests/__pycache__/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+.env
+*.pyc

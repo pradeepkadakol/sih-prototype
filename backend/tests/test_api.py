@@ -1,0 +1,83 @@
+import base64
+import hashlib
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import create_app
+from app.logic import select_inspector
+
+
+@pytest.fixture
+def client(tmp_path):
+    app = create_app(f"sqlite:///{(tmp_path / 'demo.db').as_posix()}", tmp_path / "uploads")
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def auth(client, username, password="demo1234"):
+    token = client.post("/api/login", json={"username": username, "password": password}).json()["token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_assignment_history_reveal_and_role_checks(client):
+    reviewer = auth(client, "reviewer")
+    inspector = auth(client, "inspector.arya")
+    case_id = next(case["id"] for case in client.get("/api/inspections", headers=reviewer).json() if case["status"] == "pending")
+    assert client.post(f"/api/inspections/{case_id}/assign", headers=inspector).status_code == 403
+    assigned = client.post(f"/api/inspections/{case_id}/assign", headers=reviewer, json={}).json()
+    assert assigned["commitment"] and "seed" not in assigned
+    assert client.post(f"/api/inspections/{case_id}/assign", headers=reviewer, json={}).status_code == 409
+    second = client.post(f"/api/inspections/{case_id}/assign", headers=reviewer, json={"reason": "Demo reassignment"}).json()
+    assert second["event_number"] == 2
+    history = client.get(f"/api/inspections/{case_id}/assignment-history", headers=reviewer).json()
+    assert len(history) == 2
+    revealed = client.post(f"/api/assignments/{assigned['id']}/reveal-seed", headers=reviewer).json()
+    assert hashlib.sha256(bytes.fromhex(revealed["seed"])).hexdigest() == assigned["commitment"]
+    assert select_inspector(bytes.fromhex(revealed["seed"]), revealed["case_id"], revealed["eligible"], revealed["event_number"]) == revealed["selected_inspector_id"]
+
+
+def test_inspector_submission_evidence_review_followup(client, tmp_path):
+    reviewer = auth(client, "reviewer")
+    cases = client.get("/api/inspections", headers=reviewer).json()
+    case_id = next(case["id"] for case in cases if case["status"] == "assigned")
+    detail = client.get(f"/api/inspections/{case_id}", headers=reviewer).json()
+    inspector_name = detail["assigned_inspector"]["username"]
+    inspector = auth(client, inspector_name)
+    assert client.post(f"/api/inspections/{case_id}/submit", headers=inspector).status_code == 409
+    assert client.post(f"/api/inspections/{case_id}/check-in", headers=inspector, json={"demo_override": True}).status_code == 200
+    assert client.post(f"/api/inspections/{case_id}/submit", headers=inspector).status_code == 409
+    answers = [{"item_key": item["key"], "answer": "pass", "note": "Observed"} for item in detail["template"] if item["required"]]
+    assert client.put(f"/api/inspections/{case_id}/checklist", headers=inspector, json={"responses": answers}).status_code == 200
+    finding = client.post(f"/api/inspections/{case_id}/findings", headers=inspector, json={"severity": "high", "category": "Safety", "description": "Guard rail is loose", "recommended_action": "Repair guard rail"}).json()
+    raw = b"\x89PNG\r\n\x1a\n" + b"demo-image"
+    evidence = client.post(f"/api/inspections/{case_id}/evidence", headers=inspector, json={"filename": "site.png", "mime_type": "image/png", "data_base64": base64.b64encode(raw).decode()}).json()
+    assert evidence["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert evidence["server_received_at"]
+    assert [path.read_bytes() for path in (tmp_path / "uploads").iterdir()] == [raw]
+    assert client.post(f"/api/inspections/{case_id}/submit", headers=inspector).status_code == 200
+    assert client.post(f"/api/findings/{finding['id']}/review", headers=inspector, json={"status": "accepted", "note": "Looks valid"}).status_code == 403
+    assert client.post(f"/api/findings/{finding['id']}/review", headers=reviewer, json={"status": "accepted", "note": "Repair needed"}).status_code == 200
+    followup = client.post(f"/api/findings/{finding['id']}/follow-ups", headers=reviewer, json={"owner": "Maintenance cell", "due_date": "2027-02-01", "status": "open"}).json()
+    assert followup["owner"] == "Maintenance cell"
+    assert followup["history"][0]["status"] == "open"
+    assert client.get("/api/dashboard/summary", headers=reviewer).json()["total"] >= 1
+
+
+def test_upload_rejects_wrong_mime_and_bad_bytes(client):
+    reviewer = auth(client, "reviewer")
+    case = next(case for case in client.get("/api/inspections", headers=reviewer).json() if case["status"] == "assigned")
+    inspector_name = client.get(f"/api/inspections/{case['id']}", headers=reviewer).json()["assigned_inspector"]["username"]
+    inspector = auth(client, inspector_name)
+    client.post(f"/api/inspections/{case['id']}/check-in", headers=inspector, json={"demo_override": True})
+    response = client.post(f"/api/inspections/{case['id']}/evidence", headers=inspector, json={"filename": "x.html", "mime_type": "text/html", "data_base64": base64.b64encode(b"<script>").decode()})
+    assert response.status_code == 422
+
+
+def test_new_case_cannot_use_seeded_demo_geofence_override(client):
+    reviewer = auth(client, "reviewer")
+    site_id = client.get("/api/sites", headers=reviewer).json()[0]["id"]
+    created = client.post("/api/inspections", headers=reviewer, json={"site_id": site_id}).json()
+    assigned = client.post(f"/api/inspections/{created['id']}/assign", headers=reviewer, json={}).json()
+    inspector = auth(client, assigned["selected_inspector"]["username"])
+    assert client.post(f"/api/inspections/{created['id']}/check-in", headers=inspector, json={"demo_override": True}).status_code == 403
